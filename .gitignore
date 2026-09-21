@@ -1,0 +1,7 @@
+﻿.venv/
+models/
+*.keras
+*.log
+bad_files.txt
+__pycache__/
+.ipynb_checkpoints/
