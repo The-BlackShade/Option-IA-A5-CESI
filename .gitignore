@@ -6,4 +6,3 @@ bad_files.txt
 __pycache__/
 .ipynb_checkpoints/
 .idea/
-colab_upload/
