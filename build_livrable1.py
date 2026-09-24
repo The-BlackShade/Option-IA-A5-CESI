@@ -38,14 +38,42 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 from sklearn.utils.class_weight import compute_class_weight
 
-DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
 SOURCES = ["Photo", "Painting", "Schematics", "Sketch", "Text"]
 IMG_SIZE = 128      # every image is resized to 128x128 pixels
 BATCH = 64
 SEED = 42
 
+# The same notebook runs on the laptop (CPU) and on Google Colab (free GPU).
+try:
+    import google.colab  # noqa: F401
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+if IN_COLAB:
+    from google.colab import drive
+    drive.mount("/content/drive")
+    zip_path = "/content/drive/MyDrive/CESI/livrable1_small.zip"
+    DATA_DIR = Path("/content/livrable1")               # local disk: much faster than Drive
+    if not DATA_DIR.exists():
+        !unzip -q "{zip_path}" -d {DATA_DIR}
+    def source_folder(src):  return DATA_DIR / src
+else:
+    DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
+    def source_folder(src):  return DATA_DIR / f"Dataset Livrable 1 - {src}" / src
+
 tf.keras.utils.set_random_seed(SEED)
-print("TensorFlow", tf.__version__)
+print("TensorFlow", tf.__version__, "| Colab:", IN_COLAB)
+print("GPU:", tf.config.list_physical_devices("GPU") or "none, running on CPU")
+""")
+
+md(r"""
+### Where the images come from
+The cell above detects where it is running:
+- **On the laptop**: it reads the original images from `C:\my\CESI\A5\Data Science\Data` (CPU only).
+- **On Google Colab**: it mounts Google Drive, unzips `CESI/livrable1_small.zip` (images shrunk to 256 px) onto the Colab disk and uses the free GPU. Copying to `/content` matters: reading thousands of files straight from Drive is very slow.
+
+Pick the GPU in Colab with **Runtime → Change runtime type → T4 GPU**.
 """)
 
 md(r"""
@@ -58,8 +86,7 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png"}   # skips files such as desktop.ini
 
 rows = []
 for src in SOURCES:
-    folder = DATA_DIR / f"Dataset Livrable 1 - {src}" / src
-    for p in folder.iterdir():
+    for p in source_folder(src).iterdir():
         if p.suffix.lower() in IMAGE_EXT and p.stat().st_size > 0:
             rows.append({"path": str(p), "source": src, "is_photo": int(src == "Photo")})
 
