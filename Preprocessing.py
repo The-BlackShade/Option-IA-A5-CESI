@@ -1,13 +1,9 @@
 #Paintings_02662
-import torch
 from torchvision.transforms import v2
 import os
-import random
-
 from PIL import Image
-import numpy as np
 
-from sklearn.model_selection import train_test_split
+
 
 
 """
@@ -36,6 +32,8 @@ labels = []
 
 widths = []
 heights = []
+
+IMG_SIZE = 128
 
 i = 0
 # Parcours des dossiers
@@ -67,18 +65,18 @@ for label_name in os.listdir(dataset_dir):
             try:  
                 with Image.open(filepath) as img:
                     transform = v2.Compose([
-                        v2.Grayscale(num_output_channels=3),
+                        v2.Grayscale(num_output_channels=1),
                     ])
 
                     # RGB Conversion
                     img = img.convert("RGB")
 
-                    img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+                    img.thumbnail((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
 
-                    padded_img = Image.new("RGB", (256, 256), (0, 0, 0))
+                    padded_img = Image.new("RGB", (IMG_SIZE, IMG_SIZE), (0, 0, 0))
 
-                    x = (256 - img.width) // 2
-                    y = (256 - img.height) // 2
+                    x = (IMG_SIZE - img.width) // 2
+                    y = (IMG_SIZE - img.height) // 2
 
                     padded_img.paste(img, (x, y))
 
