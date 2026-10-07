@@ -1,8 +1,8 @@
 """Generates livrable1_photo_classifier.ipynb (edit the cells here, then rerun).
 
-Follows the method of the CESI workshops: the same convolutional architecture as
-WS "Reseaux de neurones convolutifs", introduced in three stages (baseline,
-+dropout, +augmentation) so the bias/variance compromise is shown by evidence.
+Architecture from the workshop "Reseaux de neurones convolutifs". Adds, with a
+justification in the notebook: early stopping, a two-stage curriculum (the hard
+pair first, then every source), and a decision threshold tuned on validation.
 """
 import nbformat as nbf
 
@@ -19,13 +19,13 @@ TouNum digitises large volumes of documents. Before captioning (Livrable 3), the
 This notebook trains a **convolutional neural network (CNN)** that answers one question per image: *is it a photo?*
 
 ## Method
-We follow the approach of the workshop *Réseaux de neurones convolutifs*, with the same architecture, applied in three stages so that the effect of each regularisation technique is measured rather than assumed:
+The architecture is the one built in the workshop *Réseaux de neurones convolutifs*. Three additions are made, each justified by a measurement rather than by habit:
 
-| Stage | Model | Purpose |
-|---|---|---|
-| 1 | Baseline CNN | Establish the reference, and expose over-fitting |
-| 2 | + Dropout | Measure the effect of one regularisation technique |
-| 3 | + Data augmentation | Measure the effect of the second |
+| Addition | Why |
+|---|---|
+| **Early stopping** | A first study (section 9) showed the best validation loss at epoch 3 of 10; the remaining epochs only over-fitted. We now keep the weights of the best epoch. |
+| **Two-stage training** | Nearly every error is photo versus painting. The model is first trained on that pair alone, then on all five sources starting from those weights. |
+| **Tuned threshold** | The 0.5 cut-off is arbitrary. For TouNum, a missed photo is worse than a painting wrongly kept, so the threshold is chosen on validation. |
 
 | Section | Content |
 |---|---|
@@ -33,12 +33,13 @@ We follow the approach of the workshop *Réseaux de neurones convolutifs*, with 
 | 2 | Train / validation / test split |
 | 3 | Input pipeline (`tf.data`) |
 | 4 | Architecture, loss and optimiser |
-| 5 | Stage 1 — baseline |
-| 6 | Stage 2 — dropout |
-| 7 | Stage 3 — data augmentation |
-| 8 | Comparison and bias/variance analysis |
-| 9 | Final evaluation on the test set |
-| 10 | Ways to improve further |
+| 5 | Reference model: all five sources at once |
+| 6 | Stage A: the hard pair, photo versus painting |
+| 7 | Stage B: continue on all five sources |
+| 8 | Comparison, and the decision threshold |
+| 9 | Regularisation study and bias/variance analysis |
+| 10 | Final evaluation on the test set |
+| 11 | Ways to improve further |
 """)
 
 code(r"""
@@ -54,15 +55,18 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import (classification_report, confusion_matrix,
+                             ConfusionMatrixDisplay, precision_recall_fscore_support)
 from sklearn.utils.class_weight import compute_class_weight
 
 DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
 SOURCES = ["Photo", "Painting", "Schematics", "Sketch", "Text"]
+HARD_PAIR = ["Photo", "Painting"]
 
-IMG_SIZE = 128      # the workshop used 180; 128 keeps training feasible on CPU for 41,000 images
-BATCH_SIZE = 64
-EPOCHS = 10
+IMG_SIZE = 160      # 128 lost too much texture, 256 is out of reach on CPU
+BATCH_SIZE = 32
+MAX_EPOCHS = 20     # early stopping decides the real number
+PATIENCE = 3
 SEED = 42
 
 tf.keras.utils.set_random_seed(SEED)
@@ -73,7 +77,7 @@ md(r"""
 ## 1. Data
 The images are not labelled one by one: **the folder is the label**. We build a table (pandas DataFrame) with one row per image: its path, its source folder, and the binary target `is_photo` (1 = photo, 0 = anything else).
 
-> *Note on method:* the workshop used `image_dataset_from_directory`, which expects one sub-folder per class under a single root. Here the five datasets live in five separate archives, and we need a **binary** target while keeping the original category of each image for the error analysis. We therefore build the table with pandas and feed it to `tf.data`, which gives the same result with the information we need.
+> *Note on method:* the workshop used `image_dataset_from_directory`, which expects one sub-folder per class under a single root. Here the five datasets live in five separate archives, and we need a **binary** target while keeping each image's original category for the error analysis. We therefore build the table with pandas and feed it to `tf.data`.
 """)
 
 code(r"""
@@ -99,9 +103,9 @@ plt.tight_layout()
 """)
 
 md(r"""
-The classes are **imbalanced**: about 1 photo for 3 other images. A model that always answered "other" would already score ~76% accuracy, so accuracy alone cannot be trusted. Two consequences for the rest of the notebook:
+The classes are **imbalanced**: about 1 photo for 3 other images. A model answering "other" every time would already score ~76% accuracy, so accuracy alone cannot be trusted. Hence:
 - we report **precision and recall on the photo class**, not only accuracy;
-- we pass **class weights** to `fit`, so that an error on a photo costs about three times more than an error on another image. The flower dataset of the workshop was balanced and did not need this.
+- we pass **class weights** to `fit`, so an error on a photo costs about three times more. The flower dataset of the workshop was balanced and needed none of this.
 """)
 
 code(r"""
@@ -117,17 +121,24 @@ plt.tight_layout()
 md(r"""
 ## 2. Train / validation / test split
 - **Train (70%)**: the network learns from these images.
-- **Validation (15%)**: watched after each epoch to detect over-fitting and to compare the three stages.
-- **Test (15%)**: untouched until section 9, used once, for an honest final score.
+- **Validation (15%)**: used after each epoch for early stopping, for comparing models, and for choosing the decision threshold.
+- **Test (15%)**: untouched until section 10, used once.
 
-The split is **stratified by source**, so each set keeps the same mix of photos, paintings, sketches, etc.
+The split is **stratified by source**, so every set keeps the same mix of categories.
 
-> *Note on method:* the workshop split in two (train / "test", the latter used as validation during training). Using the validation set both to steer decisions and to report the final score flatters the result, so we hold out a third, independent set.
+> *Note on method:* a two-way split (train / "test") is common, but when the same set stops the training, picks the model and reports the score, that score is optimistic. The third set is what makes our final figure honest.
 """)
 
 code(r"""
 train_df, rest = train_test_split(df, test_size=0.30, stratify=df.source, random_state=SEED)
 val_df, test_df = train_test_split(rest, test_size=0.50, stratify=rest.source, random_state=SEED)
+
+# Subsets for stage A: the pair that causes nearly every error
+train_hard = train_df[train_df.source.isin(HARD_PAIR)]
+val_hard = val_df[val_df.source.isin(HARD_PAIR)]
+
+print("train", len(train_df), "| val", len(val_df), "| test", len(test_df))
+print("hard pair - train", len(train_hard), "| val", len(val_hard))
 pd.DataFrame({name: d.source.value_counts() for name, d in
               [("train", train_df), ("val", val_df), ("test", test_df)]})
 """)
@@ -136,11 +147,11 @@ md(r"""
 ## 3. Input pipeline with `tf.data`
 41,000 images do not fit in memory at full size, so `tf.data` reads them in parallel and:
 1. decodes JPG/PNG forcing **3 channels** (some images are greyscale, some have transparency),
-2. resizes them to 128×128,
-3. keeps them in memory after the first epoch (`cache`), as in the workshop,
-4. shuffles, batches and prefetches (`prefetch`), again as in the workshop.
+2. resizes them to 160×160,
+3. caches them after the first epoch, as in the workshop,
+4. shuffles, batches and prefetches.
 
-Corrupted files are skipped (`ignore_errors`). The source name and the path travel with each image so that section 9 can analyse the errors per category.
+Corrupted files are skipped (`ignore_errors`). The source and the path travel with each image so section 10 can analyse errors per category.
 """)
 
 code(r"""
@@ -159,44 +170,55 @@ def make_ds(d, training):
         ds = ds.shuffle(5000, seed=SEED)
     return ds.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
-xy = lambda img, label, src, path: (img, label)      # what Keras trains on
+xy = lambda img, label, src, path: (img, label)     # what Keras trains on
+
 train_ds = make_ds(train_df, True).map(xy)
 val_ds = make_ds(val_df, False).map(xy)
-test_ds = make_ds(test_df, False)                    # keeps source and path for the analysis
+train_hard_ds = make_ds(train_hard, True).map(xy)
+val_hard_ds = make_ds(val_hard, False).map(xy)
+test_ds = make_ds(test_df, False)                   # keeps source and path
+val_eval_ds = make_ds(val_df, False)                # same, for threshold tuning
 """)
 
 md(r"""
 ## 4. Architecture, loss and optimiser
 
-The architecture is the one built in the workshop, with three convolutional blocks:
+The architecture of the workshop, with three convolutional blocks:
 
 ```
-Input 128×128×3
+Input 160×160×3
+ → Data augmentation (flip, small rotation, small zoom)   — training only
  → Rescaling (pixels 0–255 → 0–1)
- → Conv2D 16 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2    128 → 64
- → Conv2D 32 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2     64 → 32
- → Conv2D 64 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2     32 → 16
- → Flatten                                       (16×16×64 = 16 384)
+ → Conv2D 16 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2   160 → 80
+ → Conv2D 32 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2    80 → 40
+ → Conv2D 64 filters 3×3, ReLU, padding "same"  → MaxPooling 2×2    40 → 20
+ → Dropout 0.2
+ → Flatten                                        (20×20×64 = 25 600)
  → Dense 128, ReLU
  → Dense 1, sigmoid        → probability that the image is a photo
 ```
 
-- **Convolution** detects local patterns: edges first, then textures (brush strokes, paper grain, sensor noise), then shapes. `padding="same"` keeps the size, so only pooling reduces it.
-- **MaxPooling** halves height and width, keeping the strongest activations; later layers therefore see a wider area of the image.
-- **Flatten + Dense 128** is the classification part, as in the workshop.
+**Output layer — the difference from the workshop.** It classified 5 flower species with `Dense(5)` and `SparseCategoricalCrossentropy(from_logits=True)`. Our task is **binary**, so one neuron with a **sigmoid** suffices, and the matching loss is **`binary_crossentropy`**.
 
-**Output layer — the one difference from the workshop.** The workshop classified 5 flower species and ended with `Dense(5)` plus `SparseCategoricalCrossentropy(from_logits=True)`. Our problem is **binary**, so a single neuron with a **sigmoid** is enough: it outputs one probability, and the matching loss is **`binary_crossentropy`**. Two classes do not need two neurons.
+**Optimiser:** `Adam`, learning rate 0.001, as in the workshop.
 
-**Optimiser:** `Adam`, learning rate 0.001 (the Keras default), as in the workshop. Adam adapts the step size per weight, which makes it a safe default.
+**Regularisation:** dropout 0.2 before `Flatten` and the augmentation layer, both from section 6 of the workshop. Section 9 reports what each contributed.
 
-**Metrics:** accuracy, plus precision, recall and AUC on the photo class because of the imbalance.
+**Augmentation caution:** the transformations must not change the label. A horizontal flip is safe for a photo, a painting or a sketch; a *vertical* flip would be wrong, since upside-down scans are not what TouNum receives. The rotation is kept small for the same reason.
 """)
 
 code(r"""
-# The workshop architecture; dropout and augmentation are added in stages.
-def build_model(dropout=0.0, augmentation=None, name="cnn"):
+augmentation = Sequential([
+    layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.05),      # ~18 degrees, as a fraction of a full turn
+    layers.RandomZoom(0.1),
+], name="augmentation")
+
+# The workshop architecture, with the regularisation of its section 6.
+def build_model(dropout=0.2, augment=True, name="cnn"):
     model_layers = [layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))]
-    if augmentation is not None:
+    if augment:
         model_layers.append(augmentation)
     model_layers += [
         layers.Rescaling(1. / 255),
@@ -208,11 +230,11 @@ def build_model(dropout=0.0, augmentation=None, name="cnn"):
         layers.MaxPooling2D(),
     ]
     if dropout:
-        model_layers.append(layers.Dropout(dropout))   # before Flatten, as in the workshop
+        model_layers.append(layers.Dropout(dropout))
     model_layers += [
         layers.Flatten(),
         layers.Dense(128, activation="relu"),
-        layers.Dense(1, activation="sigmoid"),         # binary: one probability
+        layers.Dense(1, activation="sigmoid"),
     ]
     model = Sequential(model_layers, name=name)
     model.compile(
@@ -225,32 +247,24 @@ def build_model(dropout=0.0, augmentation=None, name="cnn"):
     )
     return model
 
-model = build_model(name="baseline")
-model.summary()
+build_model(name="preview").summary()
 """)
 
 md(r"""
-Look at the parameter column: the three convolutional layers hold about 23,000 weights, while the `Dense(128)` after `Flatten` holds over 2 million. The convolutions analyse the image with ~1% of the parameters — the memory and computation argument for CNNs, visible on our own data.
+### Early stopping
+Training stops when the validation loss has not improved for 3 epochs, and the **weights of the best epoch are restored**. Without it the model keeps training past its best point and we would report over-fitted weights.
 """)
 
 code(r"""
-# A mistake on a photo costs ~3x more than a mistake on another image
-weights = compute_class_weight("balanced", classes=np.array([0, 1]), y=train_df.is_photo)
-class_weight = {0: weights[0], 1: weights[1]}
-print("Class weights:", class_weight)
-""")
+def early_stop():
+    return keras.callbacks.EarlyStopping(monitor="val_loss", patience=PATIENCE,
+                                         restore_best_weights=True, verbose=1)
 
-md(r"""
-## 5. Stage 1 — baseline
-No regularisation. The first epoch is slower because every image is read and decoded; afterwards they come from the cache.
-""")
+def weights_for(d):
+    # An error on a photo costs about 3x more than an error on another image
+    w = compute_class_weight("balanced", classes=np.array([0, 1]), y=d.is_photo)
+    return {0: w[0], 1: w[1]}
 
-code(r"""
-history_base = model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS,
-                         class_weight=class_weight, verbose=2)
-""")
-
-code(r"""
 def plot_curves(history, title):
     h = pd.DataFrame(history.history)
     h.index += 1
@@ -262,111 +276,139 @@ def plot_curves(history, title):
     plt.tight_layout()
     return h
 
-plot_curves(history_base, "Baseline").round(4)
+print("class weights, all sources:", weights_for(train_df))
+print("class weights, hard pair  :", weights_for(train_hard))
 """)
 
 md(r"""
-**Read the curves.** If the training loss keeps falling while the validation loss rises, the model is memorising the training images: that is **over-fitting** (high variance). The gap between the two accuracy curves measures it.
-
-*Write your reading of these curves here: at which epoch does `val_loss` stop improving, and how large is the gap?*
-""")
-
-md(r"""
-## 6. Stage 2 — dropout
-Same architecture, with a `Dropout(0.2)` before the `Flatten`, exactly as in the workshop. During training, 20% of the values are randomly set to zero, so no neuron can become the dedicated detector of one training image. Dropout adds **no parameters**: it reduces the effective capacity, not the real one.
+## 5. Reference model: all five sources at once
+The straightforward approach, and the control against which the two-stage training is measured. The first epoch is slower because every image is read and decoded; afterwards they come from the cache.
 """)
 
 code(r"""
-model_dropout = build_model(dropout=0.2, name="with_dropout")
-history_dropout = model_dropout.fit(train_ds, validation_data=val_ds, epochs=EPOCHS,
-                                    class_weight=class_weight, verbose=2)
-plot_curves(history_dropout, "With dropout").round(4)
+model_ref = build_model(name="reference")
+history_ref = model_ref.fit(train_ds, validation_data=val_ds, epochs=MAX_EPOCHS,
+                            class_weight=weights_for(train_df),
+                            callbacks=[early_stop()], verbose=2)
+plot_curves(history_ref, "Reference").round(4)
 """)
 
 md(r"""
-## 7. Stage 3 — dropout + data augmentation
-We add the augmentation layer of the workshop: horizontal flip, small rotation, small zoom. It is active **during training only**; at prediction time it does nothing.
+## 6. Stage A — the hard pair
+Photos and paintings share composition, colour and subject; schematics and text do not look like photographs at all. Training first on the pair alone forces the network to spend its capacity on the distinction that decides the score, instead of on easy wins it would get anyway.
 
-A caution specific to this project: the transformations must not change the label. A horizontal flip is safe for a photograph **and** for a painting or a sketch. A **vertical** flip would be a bad idea here, because an upside-down scanned text is not what TouNum will receive, and the rotation is kept small for the same reason.
+The sub-problem is also **balanced** (9,993 photos against 10,000 paintings), so the model learns the difference itself rather than the base rate.
 """)
 
 code(r"""
-augmentation = Sequential([
-    layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
-    layers.RandomFlip("horizontal"),
-    layers.RandomRotation(0.05),      # ~18 degrees, as a fraction of a full turn
-    layers.RandomZoom(0.1),
-], name="augmentation")
-
-model_full = build_model(dropout=0.2, augmentation=augmentation, name="dropout_augmentation")
-history_full = model_full.fit(train_ds, validation_data=val_ds, epochs=EPOCHS,
-                              class_weight=class_weight, verbose=2)
-plot_curves(history_full, "Dropout + augmentation").round(4)
+model_two = build_model(name="two_stage")
+history_a = model_two.fit(train_hard_ds, validation_data=val_hard_ds, epochs=MAX_EPOCHS,
+                          class_weight=weights_for(train_hard),
+                          callbacks=[early_stop()], verbose=2)
+plot_curves(history_a, "Stage A — photo vs painting").round(4)
 """)
 
 md(r"""
-## 8. Comparison and bias/variance analysis
+## 7. Stage B — continue on all five sources
+The same model, with the weights learned in stage A, now trained on everything. Nothing is reset: stage A is the starting point, which is why this is a form of transfer learning inside our own data.
 """)
 
 code(r"""
-runs = {"1. baseline": history_base, "2. + dropout": history_dropout, "3. + augmentation": history_full}
+history_b = model_two.fit(train_ds, validation_data=val_ds, epochs=MAX_EPOCHS,
+                          class_weight=weights_for(train_df),
+                          callbacks=[early_stop()], verbose=2)
+plot_curves(history_b, "Stage B — all sources").round(4)
+""")
+
+md(r"""
+## 8. Comparison, and the decision threshold
+""")
+
+code(r"""
+runs = {"reference (1 stage)": history_ref, "stage A (hard pair)": history_a, "stage B (all sources)": history_b}
 summary = pd.DataFrame({
-    name: {"train accuracy": h.history["accuracy"][-1],
+    name: {"epochs run": len(h.history["loss"]),
+           "train accuracy": h.history["accuracy"][-1],
            "val accuracy": h.history["val_accuracy"][-1],
            "gap": h.history["accuracy"][-1] - h.history["val_accuracy"][-1],
-           "train loss": h.history["loss"][-1],
-           "val loss": h.history["val_loss"][-1],
            "best val loss": min(h.history["val_loss"]),
            "best epoch": int(np.argmin(h.history["val_loss"]) + 1)}
     for name, h in runs.items()}).T
 summary.round(4)
 """)
 
-code(r"""
-fig, ax = plt.subplots(1, 2, figsize=(13, 4))
-for name, h in runs.items():
-    ax[0].plot(range(1, len(h.history["val_loss"]) + 1), h.history["val_loss"], marker="o", label=name)
-    ax[1].plot(range(1, len(h.history["val_accuracy"]) + 1), h.history["val_accuracy"], marker="o", label=name)
-ax[0].set_title("Validation loss"); ax[1].set_title("Validation accuracy")
-for a in ax:
-    a.set_xlabel("epoch"); a.legend(); a.grid(alpha=0.3)
-plt.tight_layout()
-""")
-
 md(r"""
-### The bias/variance compromise
-- **High bias (under-fitting):** both curves poor and close together. The model is too simple, or has not trained long enough.
-- **High variance (over-fitting):** training keeps improving while validation stalls or degrades. The model memorises.
-- The **gap** column above measures the variance; the **val accuracy** column measures what the client actually gets.
-
-*Write your analysis here, using the table and the comparison plot: which stage gives the best compromise, what did dropout change, what did augmentation change, and is any under-fitting visible (for example a validation score that stops improving while both curves stay mediocre)?*
-""")
-
-md(r"""
-## 9. Final evaluation on the test set
-The test images have never been seen: not during training, and not for choosing between the three models. Choose below the model you justified in section 8.
+### Choosing the threshold on validation
+The model outputs a probability; turning it into a decision needs a cut-off. The default 0.5 maximises nothing in particular. We sweep the threshold on the **validation** set and keep the value with the best F1 on the photo class — the test set stays untouched.
 """)
 
 code(r"""
-best_model = model_full          # change if your analysis designates another stage
-y_true, y_prob, y_src, y_path = [], [], [], []
-for img, label, src, path in test_ds:
-    y_prob.append(best_model.predict(img, verbose=0).ravel())
-    y_true.append(label.numpy()); y_src.append(src.numpy()); y_path.append(path.numpy())
-y_true = np.concatenate(y_true).astype(int)
-y_prob = np.concatenate(y_prob)
-y_src = np.array(SOURCES)[np.concatenate(y_src)]
-y_path = [p.decode() for p in np.concatenate(y_path)]
-y_pred = (y_prob >= 0.5).astype(int)
+def probabilities(model, ds):
+    probs, labels, srcs, paths = [], [], [], []
+    for img, label, src, path in ds:
+        probs.append(model.predict(img, verbose=0).ravel())
+        labels.append(label.numpy()); srcs.append(src.numpy()); paths.append(path.numpy())
+    return (np.concatenate(probs), np.concatenate(labels).astype(int),
+            np.array(SOURCES)[np.concatenate(srcs)], [p.decode() for p in np.concatenate(paths)])
 
+best_model = model_two          # change here if the reference model wins in the table above
+val_prob, val_true, _, _ = probabilities(best_model, val_eval_ds)
+
+grid = np.arange(0.05, 0.96, 0.05)
+scores = [precision_recall_fscore_support(val_true, (val_prob >= t).astype(int),
+                                          average="binary", zero_division=0)[:3] for t in grid]
+sweep = pd.DataFrame(scores, columns=["precision", "recall", "f1"], index=grid.round(2))
+THRESHOLD = float(sweep.f1.idxmax())
+print("best threshold on validation:", THRESHOLD)
+
+sweep.plot(marker="o", figsize=(9, 4), title="Validation metrics vs decision threshold")
+plt.axvline(THRESHOLD, color="grey", linestyle="--"); plt.xlabel("threshold"); plt.grid(alpha=0.3)
+sweep.round(4)
+""")
+
+md(r"""
+## 9. Regularisation study and bias/variance analysis
+
+A first experiment, run at 128×128 for 10 fixed epochs without early stopping, compared the same architecture with and without the regularisation of the workshop:
+
+| Stage | Train accuracy | Val accuracy | Gap | Best val loss | Best epoch |
+|---|---|---|---|---|---|
+| Baseline, no regularisation | 0.9825 | 0.9148 | 0.068 | 0.204 | 3 |
+| + Dropout 0.2 | 0.9632 | 0.9143 | 0.049 | 0.262 | 8 |
+| + Dropout and augmentation | 0.9077 | 0.8704 | 0.037 | 0.303 | 7 |
+
+Three facts come out of it, and they drive the choices made above:
+1. **Over-fitting is real but mild.** The baseline gap is 6.8 points, far from the flower workshop's 40 points: 41,000 images against 2,936 change the picture entirely.
+2. **Regularisation reduced the gap but not the error.** Validation accuracy stayed flat with dropout and *fell* with augmentation. Reducing variance only helps when variance is what limits you; here capacity was already the binding constraint.
+3. **The best epoch was the 3rd of 10.** Everything after it was over-fitting, which is why early stopping now ends the training.
+
+*Write your own reading of the curves of sections 5 to 7 here: where does each model stop, how big is the gap, and does the two-stage model start better than the reference?*
+""")
+
+md(r"""
+## 10. Final evaluation on the test set
+These images were never seen: not in training, not for early stopping, not for the threshold.
+""")
+
+code(r"""
+y_prob, y_true, y_src, y_path = probabilities(best_model, test_ds)
+y_pred = (y_prob >= THRESHOLD).astype(int)
+
+print(f"threshold {THRESHOLD:.2f}")
 print(classification_report(y_true, y_pred, target_names=["other", "photo"], digits=4))
 ConfusionMatrixDisplay(confusion_matrix(y_true, y_pred), display_labels=["other", "photo"]).plot(cmap="Blues")
 plt.title("Confusion matrix — test set");
 """)
 
+code(r"""
+# What the default cut-off would have given, for comparison
+print(classification_report(y_true, (y_prob >= 0.5).astype(int),
+                            target_names=["other", "photo"], digits=4))
+""")
+
 md(r"""
 ### Which sources are confused with photos?
-For each original category, the share of its images that the model calls "photo". Ideally 100% for Photo and 0% elsewhere. The course expects paintings to be the hardest, some being very realistic.
+For each original category, the share of its images the model calls "photo". Ideally 100% for Photo, 0% elsewhere. Paintings are expected to be the hardest, some being very realistic.
 """)
 
 code(r"""
@@ -389,25 +431,27 @@ plt.suptitle("Misclassified test images"); plt.tight_layout()
 """)
 
 md(r"""
-## 10. Ways to improve the bias/variance compromise
-| Technique | Effect | Status here |
+## 11. Ways to improve further
+| Technique | Effect | Status |
 |---|---|---|
-| **Data augmentation** | More varied training images; reduces variance | Applied, stage 3 |
-| **Dropout** | Randomly disables neurons; reduces variance | Applied, stage 2 |
-| **Class weights** | Compensates the 1:3 imbalance | Applied |
-| **Early stopping** | Stops at the best validation epoch | Not applied: the "best epoch" column shows where it would have stopped |
-| **L2 regularisation** (`kernel_regularizer`) | Penalises large weights | To try |
-| **Larger images** (180 or 224 px) | Keeps fine texture: brush strokes vs. sensor noise | To try; costly on CPU |
-| **Transfer learning** (MobileNetV2 / EfficientNet pre-trained on ImageNet) | Reuses features learned on millions of photographs | Week 3 of the course; likely the biggest gain on paintings |
-| **Threshold tuning** | Trades precision against recall by moving the 0.5 cut-off | To try on the validation set |
+| **Dropout and augmentation** | Reduce variance | Applied; measured in section 9 |
+| **Class weights** | Compensate the 1:3 imbalance | Applied |
+| **Early stopping** | Keep the best epoch | Applied, patience 3 |
+| **Two-stage training** | Spend capacity on the hard pair | Applied, sections 6–7 |
+| **Threshold tuning** | Trade precision against recall | Applied, section 8 |
+| **Larger images** (256 px) | Keeps the texture that separates paint from sensor noise | Not done: ~6 h per model on CPU. The obvious next step on a GPU |
+| **L2 regularisation** | Penalises large weights | To try |
+| **Transfer learning** (MobileNetV2, EfficientNet) | Reuses features learned on millions of photographs | Phase 6 of the course; the largest expected gain |
 
-**For TouNum's pipeline**, the choice of threshold is a business decision: a missed photo never gets captioned, whereas a painting wrongly kept only wastes compute downstream. That argues for favouring **recall** on the photo class.
+**For TouNum's pipeline**, the threshold is a business decision: a missed photo is never captioned, while a painting wrongly kept only wastes computation downstream. That argues for favouring **recall** on the photo class, and section 8 shows the exact cost in precision.
 """)
 
 code(r"""
 Path("models").mkdir(exist_ok=True)
 best_model.save("models/photo_classifier.keras")
-print("Saved to models/photo_classifier.keras")
+with open("models/threshold.txt", "w") as f:
+    f.write(str(THRESHOLD))
+print("Saved model and threshold", THRESHOLD)
 """)
 
 nb = nbf.v4.new_notebook(cells=cells, metadata={
