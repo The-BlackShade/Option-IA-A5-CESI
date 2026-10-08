@@ -14,12 +14,21 @@ NAME = "WS_NLP_RNN_Etudiant_EN_relu.ipynb"
 MARKER = re.compile(r"<em>\s*(?:PLEASE COMPLETE|TO COMPLETE|TO BE COMPLETED)\s*</em>", re.I)
 
 CODE = {
-6: '''import os
+6: r'''import os
 
 # Solution: resolve the folder instead of os.chdir, which breaks when the cell
 # is run twice (the second call looks for the folder inside itself).
 from pathlib import Path
-DATA = Path('nlp-getting-started') if Path('nlp-getting-started/train.csv').exists() else Path('.')
+
+CANDIDATES = [
+    Path('nlp-getting-started'),
+    Path('.'),
+    Path(r"C:\my\CESI\A5\Data Science\Data\nlp-getting-started"),
+]
+DATA = next((p for p in CANDIDATES if (p / 'train.csv').exists()), None)
+if DATA is None:
+    raise FileNotFoundError("train.csv not found. Looked in: " +
+                            ", ".join(str(p.resolve()) for p in CANDIDATES))
 print('reading from', DATA.resolve())
 
 train_data = pd.read_csv(DATA / 'train.csv', usecols=['text', 'target'],
