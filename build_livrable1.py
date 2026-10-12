@@ -63,6 +63,20 @@ DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
 SOURCES = ["Photo", "Painting", "Schematics", "Sketch", "Text"]
 HARD_PAIR = ["Photo", "Painting"]
 
+# The images now sit in one flat folder and the class is carried by the file
+# name (photo_*, painting_*, schematics_*, text_*, anything else = a sketch).
+# The per-class folders of the first delivery still work if they are there.
+FLAT_DIR = DATA_DIR / "Dataset Livrable 1"
+PREFIXES = {"photo": "Photo", "painting": "Painting",
+            "schematics": "Schematics", "text": "Text"}
+
+def source_of(name):
+    low = name.lower()
+    for prefix, src in PREFIXES.items():
+        if low.startswith(prefix):
+            return src
+    return "Sketch"
+
 IMG_SIZE = 160      # 128 lost too much texture, 256 is out of reach on CPU
 BATCH_SIZE = 32
 MAX_EPOCHS = 20     # early stopping decides the real number
@@ -84,11 +98,15 @@ code(r"""
 IMAGE_EXT = {".jpg", ".jpeg", ".png"}   # skips files such as desktop.ini
 
 rows = []
-for src in SOURCES:
-    folder = DATA_DIR / f"Dataset Livrable 1 - {src}" / src
-    for p in folder.iterdir():
-        if p.suffix.lower() in IMAGE_EXT and p.stat().st_size > 0:
-            rows.append({"path": str(p), "source": src, "is_photo": int(src == "Photo")})
+folders = [(DATA_DIR / f"Dataset Livrable 1 - {s}" / s, s) for s in SOURCES]
+if all(f.is_dir() for f, _ in folders):          # original layout: one folder per class
+    files = [(p, s) for f, s in folders for p in f.iterdir()]
+else:                                             # flat layout: the class is in the name
+    files = [(p, source_of(p.name)) for p in FLAT_DIR.iterdir()]
+
+for p, src in files:
+    if p.suffix.lower() in IMAGE_EXT and p.stat().st_size > 0:
+        rows.append({"path": str(p), "source": src, "is_photo": int(src == "Photo")})
 
 df = pd.DataFrame(rows)
 print(len(df), "images")

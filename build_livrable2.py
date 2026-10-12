@@ -55,7 +55,29 @@ from tensorflow.keras.models import Sequential
 
 DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
 NOISY_DIR = DATA_DIR / "Dataset Livrable 2" / "Dataset"
-CLEAN_DIR = DATA_DIR / "Dataset Livrable 1 - Photo" / "Photo"
+
+# The Livrable 1 images now live in one flat folder; the class is in the file
+# name (photo_*, painting_*, schematics_*, text_*, anything else = sketch).
+# The per-class folders of the first delivery are still handled, if present.
+FLAT_DIR = DATA_DIR / "Dataset Livrable 1"
+PREFIXES = {"photo": "Photo", "painting": "Painting",
+            "schematics": "Schematics", "text": "Text"}
+
+def source_of(name):
+    low = name.lower()
+    for prefix, src in PREFIXES.items():
+        if low.startswith(prefix):
+            return src
+    return "Sketch"
+
+IMAGE_EXT = {".jpg", ".jpeg", ".png"}     # 800 of the sketches are PNG
+
+def list_images(source):
+    folder = DATA_DIR / f"Dataset Livrable 1 - {source}" / source
+    if folder.is_dir():                                   # original layout
+        return sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXT)
+    return sorted(p for p in FLAT_DIR.iterdir()           # flat layout
+                  if p.suffix.lower() in IMAGE_EXT and source_of(p.name) == source)
 
 IMG_SIZE = 128        # working size of the denoiser
 CLS_SIZE = 160        # input size of the Livrable 1 classifier
@@ -67,7 +89,7 @@ SEED = 42
 
 tf.keras.utils.set_random_seed(SEED)
 print("TensorFlow", tf.__version__)
-print(len(list(NOISY_DIR.glob("*.jpg"))), "noisy images |", len(list(CLEAN_DIR.glob("*.jpg"))), "clean photos")
+print(len(list(NOISY_DIR.glob("*.jpg"))), "noisy images |", len(list_images("Photo")), "clean photos")
 """)
 
 md(r"""
@@ -123,7 +145,7 @@ sigmas = np.array([estimate_sigma(im) for im in sample])
 print(f"estimated sigma on TouNum's images: mean {sigmas.mean():.3f}, "
       f"min {sigmas.min():.3f}, max {sigmas.max():.3f}  (pixels in [0, 1])")
 
-clean_paths = sorted(CLEAN_DIR.glob("*.jpg"))
+clean_paths = list_images("Photo")
 clean_sample = [read_image(p, IMG_SIZE).numpy() for p in clean_paths[:40]]
 clean_sigmas = np.array([estimate_sigma(im) for im in clean_sample])
 print(f"same estimator on clean photographs: mean {clean_sigmas.mean():.3f}")
@@ -335,16 +357,21 @@ code(r"""
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report
 
-encoder = keras.Model(denoiser.input,
-                      layers.GlobalAveragePooling2D()(denoiser.get_layer("bottleneck").output),
-                      name="encoder")
+# Keras 3 does not expose .input on a Sequential model, so the encoder is built
+# by replaying the trained layers up to the bottleneck (same weights, no copy).
+enc_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+x = enc_in
+for layer in denoiser.layers:
+    x = layer(x)
+    if layer.name == "bottleneck":
+        break
+encoder = keras.Model(enc_in, layers.GlobalAveragePooling2D()(x), name="encoder")
 print("encoder output:", encoder.output_shape)
 
 SOURCES = ["Photo", "Painting", "Schematics", "Sketch", "Text"]
 rows = []
 for src in SOURCES:
-    folder = DATA_DIR / f"Dataset Livrable 1 - {src}" / src
-    for p in sorted(folder.glob("*.jpg"))[:1200]:
+    for p in list_images(src)[:1200]:
         rows.append({"path": str(p), "source": src, "is_photo": int(src == "Photo")})
 sub = pd.DataFrame(rows).sample(frac=1, random_state=SEED).reset_index(drop=True)
 print(len(sub), "images encoded")
