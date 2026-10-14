@@ -325,6 +325,104 @@ plt.tight_layout()
 """)
 
 md(r"""
+## 6b. Model B — residual learning and skip connections
+
+Model A loses PSNR: the reconstruction is blurrier than the noise is strong. The diagnosis is structural, so the fix is too.
+
+**Residual learning.** Instead of rebuilding the image, the network predicts **the noise**, and we subtract it:
+
+```
+output = input − predicted_noise
+```
+
+The detail of the original image passes through untouched; only the correction is learned. If the model predicts nothing at all, the output equals the input — so it starts from "do no harm" rather than from "rebuild everything from a bottleneck". This is how DnCNN works.
+
+**Skip connections (U-Net).** The encoder's feature maps are concatenated into the decoder at the same resolution, so fine detail bypasses the bottleneck instead of having to survive it.
+
+Everything else is identical — same data, same pairs, same loss, same early stopping — so the comparison measures these two ideas and nothing else.
+""")
+
+code(r"""
+def build_residual_denoiser(name="denoiser_residual"):
+    inp = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+
+    c1 = layers.Conv2D(32, 3, activation="relu", padding="same")(inp)   # 128
+    p1 = layers.MaxPooling2D()(c1)                                      # 64
+    c2 = layers.Conv2D(32, 3, activation="relu", padding="same")(p1)
+    p2 = layers.MaxPooling2D()(c2)                                      # 32, bottleneck
+
+    d1 = layers.Conv2D(32, 3, activation="relu", padding="same")(p2)
+    u1 = layers.UpSampling2D()(d1)                                      # 64
+    m1 = layers.Concatenate()([u1, c2])                                 # skip connection
+    d2 = layers.Conv2D(32, 3, activation="relu", padding="same")(m1)
+    u2 = layers.UpSampling2D()(d2)                                      # 128
+    m2 = layers.Concatenate()([u2, c1])                                 # skip connection
+
+    # No activation here: the predicted noise can be positive or negative
+    noise = layers.Conv2D(3, 3, padding="same", name="predicted_noise")(m2)
+    clean = layers.Subtract()([inp, noise])
+    out = layers.ReLU(max_value=1.0)(clean)        # keeps the result inside [0, 1]
+
+    model = keras.Model(inp, out, name=name)
+    model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse", metrics=["mae"])
+    return model
+
+model_b = build_residual_denoiser()
+model_b.summary()
+""")
+
+code(r"""
+history_b = model_b.fit(
+    train_ds, validation_data=val_ds, epochs=MAX_EPOCHS,
+    callbacks=[keras.callbacks.EarlyStopping(monitor="val_loss", patience=PATIENCE,
+                                             restore_best_weights=True, verbose=1)],
+    verbose=2)
+
+hb = pd.DataFrame(history_b.history); hb.index += 1
+ax = h[["val_loss"]].rename(columns={"val_loss": "A: plain autoencoder"}).plot(marker="o", figsize=(9, 4))
+hb[["val_loss"]].rename(columns={"val_loss": "B: residual + skips"}).plot(ax=ax, marker="o")
+ax.set_title("Validation loss"); ax.set_xlabel("epoch"); ax.grid(alpha=0.3)
+hb.round(5)
+""")
+
+code(r"""
+rows = []
+for noisy_b, clean_b in val_ds.take(10):
+    a = denoiser.predict(noisy_b, verbose=0)
+    b = model_b.predict(noisy_b, verbose=0)
+    rows.append({"noisy": psnr(noisy_b, clean_b),
+                 "A: plain": psnr(tf.convert_to_tensor(a), clean_b),
+                 "B: residual + skips": psnr(tf.convert_to_tensor(b), clean_b)})
+comp = pd.DataFrame(rows).mean()
+comp["gain A"] = comp["A: plain"] - comp["noisy"]
+comp["gain B"] = comp["B: residual + skips"] - comp["noisy"]
+comp.round(2).to_frame("PSNR (dB)")
+""")
+
+code(r"""
+noisy_b, clean_b = next(iter(val_ds))
+a = denoiser.predict(noisy_b, verbose=0)
+b = model_b.predict(noisy_b, verbose=0)
+fig, axes = plt.subplots(4, 6, figsize=(15, 10))
+for i in range(6):
+    for r, img in enumerate([noisy_b[i], a[i], b[i], clean_b[i]]):
+        axes[r, i].imshow(img); axes[r, i].axis("off")
+for r, lab in enumerate(["noisy", "A: plain", "B: residual + skips", "original"]):
+    axes[r, 0].set_title(lab, loc="left")
+plt.tight_layout()
+""")
+
+code(r"""
+# The rest of the notebook uses whichever model won on the validation pairs.
+best_denoiser = model_b if comp["gain B"] > comp["gain A"] else denoiser
+print("kept:", best_denoiser.name, "| PSNR gain", round(max(comp["gain A"], comp["gain B"]), 2), "dB")
+""")
+
+md(r"""
+*Comment on the table: did residual learning turn the gain positive, and by how much? Say also what it costs — the parameter count and the training time are in the summaries above.*
+""")
+
+md(r"""
 ## 7. Application to TouNum's real images
 The real test. Here there is **no ground truth**, so PSNR is impossible and the evaluation has to be indirect:
 
@@ -335,7 +433,7 @@ The real test. Here there is **no ground truth**, so PSNR is impossible and the 
 
 code(r"""
 real = tf.stack([read_image(p, IMG_SIZE) for p in noisy_paths])
-real_out = denoiser.predict(real, verbose=0)
+real_out = best_denoiser.predict(real, verbose=0)
 
 before = np.array([estimate_sigma(im) for im in real.numpy()[:40]])
 after = np.array([estimate_sigma(im) for im in real_out[:40]])
@@ -435,8 +533,8 @@ md(r"""
 
 code(r"""
 Path("models").mkdir(exist_ok=True)
-denoiser.save("models/denoiser_rgb.keras")
-print("saved models/denoiser_rgb.keras")
+best_denoiser.save("models/denoiser_rgb.keras")
+print("saved models/denoiser_rgb.keras ->", best_denoiser.name)
 """)
 
 nb = nbf.v4.new_notebook(cells=cells, metadata={
