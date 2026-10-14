@@ -59,9 +59,22 @@ from sklearn.metrics import (classification_report, confusion_matrix,
                              ConfusionMatrixDisplay, precision_recall_fscore_support)
 from sklearn.utils.class_weight import compute_class_weight
 
-DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
 SOURCES = ["Photo", "Painting", "Schematics", "Sketch", "Text"]
 HARD_PAIR = ["Photo", "Painting"]
+
+# The delivery has been reorganised more than once (one folder per class, one
+# flat folder, and an extra level when the archives are unzipped in place), so
+# the root is searched rather than hard-coded.
+ROOT = Path(r"C:\my\CESI\A5\Data Science\Data")
+
+def find_data_dir():
+    for folder in [ROOT, *sorted(p for p in ROOT.iterdir() if p.is_dir())]:
+        if (folder / "Dataset Livrable 1 - Photo" / "Photo").is_dir() or (folder / "Dataset Livrable 1").is_dir():
+            return folder
+    raise FileNotFoundError(f"no Livrable 1 data under {ROOT}")
+
+DATA_DIR = find_data_dir()
+print("data:", DATA_DIR)
 
 # The images now sit in one flat folder and the class is carried by the file
 # name (photo_*, painting_*, schematics_*, text_*, anything else = a sketch).

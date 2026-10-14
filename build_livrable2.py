@@ -53,8 +53,22 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
 
-DATA_DIR = Path(r"C:\my\CESI\A5\Data Science\Data")
-NOISY_DIR = DATA_DIR / "Dataset Livrable 2" / "Dataset"
+# The delivery has been reorganised more than once, so the root is searched
+# rather than hard-coded (per-class folders, a flat folder, or an extra level
+# left behind when the archives are unzipped in place).
+ROOT = Path(r"C:\my\CESI\A5\Data Science\Data")
+
+def find_dir(*parts):
+    for folder in [ROOT, *sorted(p for p in ROOT.iterdir() if p.is_dir())]:
+        if (folder.joinpath(*parts)).is_dir():
+            return folder.joinpath(*parts)
+    return None
+
+DATA_DIR = (find_dir("Dataset Livrable 1 - Photo", "Photo") or find_dir("Dataset Livrable 1")).parent
+if DATA_DIR.name.startswith("Dataset Livrable 1 - "):      # found the inner class folder
+    DATA_DIR = DATA_DIR.parent
+NOISY_DIR = find_dir("Dataset Livrable 2", "Dataset")
+print("data:", DATA_DIR, "| noisy:", NOISY_DIR)
 
 # The Livrable 1 images now live in one flat folder; the class is in the file
 # name (photo_*, painting_*, schematics_*, text_*, anything else = sketch).
