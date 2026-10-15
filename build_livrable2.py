@@ -94,7 +94,7 @@ def list_images(source):
                   if p.suffix.lower() in IMAGE_EXT and source_of(p.name) == source)
 
 IMG_SIZE = 128        # working size of the denoiser
-CLS_SIZE = 160        # input size of the Livrable 1 classifier
+CLS_SIZE = 256        # input size of the Livrable 1 classifier (padded square)
 BATCH_SIZE = 32
 MAX_EPOCHS = 20
 PATIENCE = 3
@@ -108,24 +108,61 @@ print(len(list(NOISY_DIR.glob("*.jpg"))), "noisy images |", len(list_images("Pho
 
 md(r"""
 ## 1. The chain: Livrable 1 filters the batch
-The deliverables form a pipeline. Before cleaning anything we run **the classifier trained in Livrable 1**, with the threshold chosen there on validation (0.65), over TouNum's 148 noisy images.
+The deliverables form a pipeline. Before cleaning anything we run **the classifier of Livrable 1** (`Jupyter_notebook_p1_complete_1.ipynb`: a PyTorch CNN, images padded to 256×256, trained in two steps, test accuracy 0.9743 / F1 0.9478) over TouNum's 148 noisy images.
+
+The model is reloaded exactly as Livrable 1 defines it — same class, same pre-processing (`resize_with_pad` to 256, pixels scaled to [0, 1]), same 0.5 decision threshold on the sigmoid — from its saved weights `models/photo_classifier_best.pth`.
 
 Two things come out of it: the images to clean, and a first measurement — *does noise disturb the classifier?* It was trained on clean images, so this is a genuine test of its robustness.
 """)
 
 code(r"""
-classifier = keras.models.load_model("models/photo_classifier.keras")
-THRESHOLD = float(Path("models/threshold.txt").read_text())
-print("classifier input", classifier.input_shape, "| threshold", THRESHOLD)
+import torch
+import torch.nn as nn
+
+# The classifier of Livrable 1, unchanged (Jupyter_notebook_p1_complete_1.ipynb, cell "CNN")
+class PhotoClassifier(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)))
+        self.classifier = nn.Sequential(nn.Flatten(), nn.Dropout(0.3), nn.Linear(256, 1))
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+WEIGHTS = Path("models/photo_classifier_best.pth")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+classifier = PhotoClassifier().to(device)
+classifier.load_state_dict(torch.load(WEIGHTS, map_location=device))
+classifier.eval()
+THRESHOLD = 0.5                        # the decision rule of Livrable 1: sigmoid >= 0.5
+print("Livrable 1 classifier loaded from", WEIGHTS, "| device", device)
 
 noisy_paths = sorted(NOISY_DIR.glob("*.jpg"))
 
 def read_image(path, size):
+    # Livrable 1 pre-processing: pad to a square of `size`, keep proportions, pixels in [0, 1]
     img = tf.io.decode_image(tf.io.read_file(str(path)), channels=3, expand_animations=False)
-    return tf.image.resize(img, (size, size)) / 255.0
+    return tf.image.resize_with_pad(img, size, size) / 255.0
 
-batch_cls = tf.stack([read_image(p, CLS_SIZE) * 255.0 for p in noisy_paths])   # classifier rescales itself
-p_photo = classifier.predict(batch_cls, verbose=0).ravel()
+def p_photo_of(images01):
+    # images01: array (n, H, W, 3) in [0, 1]  ->  probability of "photo" per image
+    x = torch.from_numpy(np.asarray(images01, dtype="float32")).permute(0, 3, 1, 2).to(device)
+    with torch.no_grad():
+        return torch.sigmoid(classifier(x)).cpu().numpy().ravel()
+
+real_cls = np.stack([read_image(p, CLS_SIZE).numpy() for p in noisy_paths])
+p_photo = p_photo_of(real_cls)
 
 kept = p_photo >= THRESHOLD
 print(f"kept as photographs: {kept.sum()} / {len(noisy_paths)}")
@@ -250,9 +287,10 @@ Input 128×128×3
 """)
 
 code(r"""
-def build_denoiser(name="denoiser"):
+def build_denoiser(name="denoiser", size=IMG_SIZE):
+    # size=None gives a model that accepts any image size (the network is fully convolutional)
     model = Sequential([
-        layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+        layers.Input(shape=(size, size, 3)),
         layers.Conv2D(32, 3, activation="relu", padding="same"),
         layers.MaxPooling2D(padding="same"),
         layers.Conv2D(32, 3, activation="relu", padding="same"),
@@ -343,8 +381,8 @@ Everything else is identical — same data, same pairs, same loss, same early st
 """)
 
 code(r"""
-def build_residual_denoiser(name="denoiser_residual"):
-    inp = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+def build_residual_denoiser(name="denoiser_residual", size=IMG_SIZE):
+    inp = layers.Input(shape=(size, size, 3))      # size=None: any image size
 
     c1 = layers.Conv2D(32, 3, activation="relu", padding="same")(inp)   # 128
     p1 = layers.MaxPooling2D()(c1)                                      # 64
@@ -432,15 +470,22 @@ The real test. Here there is **no ground truth**, so PSNR is impossible and the 
 """)
 
 code(r"""
-real = tf.stack([read_image(p, IMG_SIZE) for p in noisy_paths])
-real_out = best_denoiser.predict(real, verbose=0)
+# The denoiser was trained at 128x128 but is fully convolutional, so the same
+# weights run at the classifier's 256x256: we rebuild it with a free input size
+# and copy the trained weights. The real images are then cleaned at the exact
+# resolution the Livrable 1 classifier sees, with no extra resizing in between.
+BUILDERS = {"denoiser": build_denoiser, "denoiser_residual": build_residual_denoiser}
+apply_denoiser = BUILDERS[best_denoiser.name](size=None)
+apply_denoiser.set_weights(best_denoiser.get_weights())
 
-before = np.array([estimate_sigma(im) for im in real.numpy()[:40]])
+real = real_cls                                   # (148, 256, 256, 3), padded, in [0, 1]
+real_out = apply_denoiser.predict(real, batch_size=8, verbose=0)
+
+before = np.array([estimate_sigma(im) for im in real[:40]])
 after = np.array([estimate_sigma(im) for im in real_out[:40]])
 print(f"estimated sigma  before {before.mean():.3f}   after {after.mean():.3f}")
 
-up = tf.image.resize(tf.convert_to_tensor(real_out), (CLS_SIZE, CLS_SIZE)) * 255.0
-p_after = classifier.predict(up, verbose=0).ravel()
+p_after = p_photo_of(real_out)
 print(f"p(photo) mean    before {p_photo.mean():.3f}   after {p_after.mean():.3f}")
 print(f"kept as photos   before {(p_photo >= THRESHOLD).sum()}   after {(p_after >= THRESHOLD).sum()}  of {len(noisy_paths)}")
 """)
